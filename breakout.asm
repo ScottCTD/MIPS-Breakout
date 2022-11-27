@@ -14,8 +14,8 @@
 	.eqv UNIT_HEIGHT 4
 	.eqv DISPLAY_WIDTH 512
 	.eqv DISPLAY_HEIGHT 256
-	.eqv BRICK_AMOUNT 7		# the number of bricks
-	.eqv BRICK_SECTION_AMOUNT 8	# the number of sections per brick
+	.eqv MAX_X 128
+	.eqv MAX_Y 64
 
 	.data
 ##############################################################################
@@ -35,10 +35,13 @@ WALL_ATTRIBUTES:
 	
 # The attributes of the bricks.
 # we have a total of 7 rows of bricks
+# the brick collision need also be modified
 BRICK_ATTRIBUTES:
-	.word 3		# thickness of the bricks, in units
-	.word 1		# space between two bricks, in units
-	.word 0xFF0000	# color of the outermost bricks
+	.word 2		# thickness of the bricks, in units
+	.word 8		# the number of sections per brick
+	.word 1		# space between rows, in units
+	.word 1		# space between sections, in units
+	.word 0xFF0000	# color of the top bricks
 	.word 0xFF7F00
 	.word 0xFFFF00
 	.word 0x00FF00
@@ -53,13 +56,42 @@ PADDLE_ATTRIBUTES:
 	
 BALL_ATTRIBUTES:
 	.word 0xFFFFFF	# ball color
-	.word 2		# ball radius
+	.word 1		# ball radius
 
 ##############################################################################
 # Mutable Data
 ##############################################################################
 
+GAME_STATUS: 
+	.word 0		# 0 = stop, 1 = start
 
+# wall boundaries
+WALL_AABB:
+	.word 0		# top
+	.word 0		# left
+	.word 0 		# right
+
+# ball AABB
+BALL_AABB:
+	.word 0:4	# upper left x0, y0, upper right x, lower left y
+	
+# default direction as upper left
+BALL_DIRECTION:
+	.word -1		# x direction
+	.word -1		# y direction
+	
+# paddle AABB
+PADDLE_AABB:
+	.word 0:4	# upper left x0, y0, upper right x, lower left y
+
+# brick AABBs
+# we have 7 (row) * 2 (sections per row) = 14 bricks.
+# Each brick object consists of 
+# the health (1 integer) and the AABB (4 integers)
+# so there are 14 * 5 = 70 integers
+# if the health is 0, then we don't display and collide the brick
+BRICKS_DATA:
+	.word 0:70
 
 ##############################################################################
 # Code
@@ -73,213 +105,838 @@ BALL_ATTRIBUTES:
 
 	# Run the Brick Breaker game.
 main:
-	lw $s7, ADDR_DSPL		# $s7 = the display base address
 
-# registers: s0: left and right wall width, s1: left wall end, s2: right wall start
 init_walls:
 	# init walls
 	# top walls
-	addi $sp, $sp, -4		# start
+	addi $sp, $sp, -4		# start_x
 	sw $zero, 0($sp)
-	addi $sp, $sp, -4		# end
-	li $t0, DISPLAY_WIDTH
+	addi $sp, $sp, -4		# end_x
+	li $t0, MAX_X
 	sw $t0, 0($sp)
+	addi $sp, $sp, -4		# y
+	sw $zero, 0($sp)
 	addi $sp, $sp, -4		# width
 	lw $t0, WALL_ATTRIBUTES + 4
 	sw $t0, 0($sp)
 	addi $sp, $sp, -4		# color
 	lw $t0, WALL_ATTRIBUTES
 	sw $t0, 0($sp)
-	addi $sp, $sp, -4		# increment
-	li $t0, DISPLAY_WIDTH
-	sw $t0, 0($sp)
-	jal draw_block
-
-	# left walls
-	# calculate initial start pixel and store in $t0
-	li $t0, DISPLAY_WIDTH		# $t0 = DISPLAY_WIDTH
-	lw $t1, WALL_ATTRIBUTES + 4	# $t1 = WALL_ATTRIBUTES[1] = thickness
-	mul $t0, $t0, $t1		# $t0 = DISPLAY_WIDTH * THINCKNESS = start pixel
-	# calculate initial end pixel and store in $t1
-	li $t1, UNIT_WIDTH		# $t1 = UNIT_WIDTH
-	lw $t2, WALL_ATTRIBUTES + 4	# $t2 = WALL_ATTRIBUTES[1] = thickness
-	mul $t1, $t1, $t2		# $t1 = UNIT_WIDTH * WALL_ATTRIBUTES[1]
-	add $t1, $t0, $t1		# $t1 = initial start + UNIT_WIDTH * WALL_ATTRIBUTES[1]
-	move $s1, $t1
-	# calculate width and store in $s0
-	li $t2, DISPLAY_HEIGHT		# $t2 = DISPLAY_HEIGHT
-	li $t3, UNIT_HEIGHT		# $t3 = UNIT_HEIGHT
-	div $t2, $t2, $t3		# $t2 = DISPLAY_HEIGHT // UNIT_HEIGHT
-	lw $t3, WALL_ATTRIBUTES + 4	# $t4 = WALL_ATTRIBUTES[1]
-	sub $s0, $t2, $t3
+	jal draw_block_unit
 	
-	addi $sp, $sp, -4		# start
+	# left walls
+	addi $sp, $sp, -4		# start_x
+	sw $zero, 0($sp)
+	addi $sp, $sp, -4		# end_x
+	lw $t0, WALL_ATTRIBUTES + 4
 	sw $t0, 0($sp)
-	addi $sp, $sp, -4		# end
-	sw $t1, 0($sp)
+	addi $sp, $sp, -4		# y
+	sw $t0, 0($sp)
 	addi $sp, $sp, -4		# width
-	sw $s0, 0($sp)
+	lw $t0, WALL_ATTRIBUTES + 4
+	li $t1, MAX_Y
+	sub $t0, $t1, $t0
+	sw $t0, 0($sp)
 	addi $sp, $sp, -4		# color
 	lw $t0, WALL_ATTRIBUTES
 	sw $t0, 0($sp)
-	addi $sp, $sp, -4		# increment
-	li $t0, DISPLAY_WIDTH
-	sw $t0, 0($sp)
-	jal draw_block
+	jal draw_block_unit
 
 	# right walls
-	# initial start = $t0
-	lw $t1, WALL_ATTRIBUTES + 4	# $t1 = WALL_ATTRIBUTES[1] = thickness
-	addi $t1, $t1, 1
-	mul $t2, $t1, DISPLAY_WIDTH	# $t2 = (WALL_ATTRIBUTES[1] + 1) * DISPLAY_WIDTH
-	addi $t1, $t1, -1
-	mul $t1, $t1, UNIT_WIDTH
-	sub $t0, $t2, $t1		# $t0 = (WALL_ATTRIBUTES[1] + 1) * DISPLAY_WIDTH - WALL_ATTRIBUTES[1] * UNIT_WIDTH
-	move $s2, $t0
-	# initial end = $t1
-	move $t1, $t2
-	# width = $s0
-	
-	addi $sp, $sp, -4		# start
+	addi $sp, $sp, -4		# start_x
+	li $t0, MAX_X
+	lw $t1, WALL_ATTRIBUTES + 4
+	sub $t0, $t0, $t1
 	sw $t0, 0($sp)
-	addi $sp, $sp, -4		# end
-	sw $t1, 0($sp)
+	addi $sp, $sp, -4		# end_x
+	li $t0, MAX_X
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4		# y
+	lw $t0, WALL_ATTRIBUTES + 4
+	sw $t0, 0($sp)
 	addi $sp, $sp, -4		# width
-	sw $s0, 0($sp)
+	lw $t0, WALL_ATTRIBUTES + 4
+	li $t1, MAX_Y
+	sub $t0, $t1, $t0
+	sw $t0, 0($sp)
 	addi $sp, $sp, -4		# color
 	lw $t0, WALL_ATTRIBUTES
 	sw $t0, 0($sp)
-	addi $sp, $sp, -4		# increment
-	li $t0, DISPLAY_WIDTH
-	sw $t0, 0($sp)
-	jal draw_block
+	jal draw_block_unit
+	
+	# save wall boundaries
+	lw $t0, WALL_ATTRIBUTES + 4
+	sw $t0, WALL_AABB
+	sw $t0, WALL_AABB + 4
+	li $t0, MAX_X
+	lw $t1, WALL_ATTRIBUTES + 4
+	sub $t0, $t0, $t1
+	sw $t0, WALL_AABB + 8
+	
 
-# registers: s1: left wall end, s2: right wall start
-init_bricks:
+init_bricks_:
 	li $t0, 0			# loop index
-	li $t1, BRICK_AMOUNT		# loop end
-	la $t2, BRICK_ATTRIBUTES + 8	# initial color addr
-init_bricks_loop:
-	beq $t0, $t1, init_bricks_loop_end
-	# store $t0, $t1, and $t2 in the stack
+	li $t1, 7			# loop end (7 rows of bricks)
+	la $t2, BRICK_ATTRIBUTES + 16	# initial color addr
+	lw $t3, WALL_ATTRIBUTES + 4	# initial x
+	lw $t4, WALL_ATTRIBUTES + 4	# initial y
+	addi $t4, $t4, 1
+	la $s0, BRICKS_DATA		# the base addr of BRICKS_DATA
+# draw sections in the row
+init_bricks_outer_loop:
+	beq $t0, $t1, init_bricks_outer_loop_end
+	# calculate section length and store in $t5
+	lw $t5, WALL_ATTRIBUTES + 4	# wall thickness
+	li $t6, MAX_X			
+	mul $t5, $t5, 2			# wall thickness * 2
+	sub $t6, $t6, $t5		# $t6 = MAX_X - wall thickness * 2
+	lw $t7, BRICK_ATTRIBUTES + 12	# $t7 = space between sections
+	lw $t9, BRICK_ATTRIBUTES + 4	# $t9 = number of sections
+	mul $t8, $t7, $t9		# $t8 = space * number of sections
+	mul $t5, $t7, 2
+	add $t7, $t8, $t5		# $t7 = space * (number of sections + 2)
+	sub $t6, $t6, $t7		# $t6 = MAX_X - wall thickness * 2 - spaces
+	div $t5, $t6, $t9		# useable area // number of sections = the length of each section	
+	# calculate inner loop end and store in $t6
+	lw $t6, WALL_ATTRIBUTES + 4	# $t6 = wall thickness
+	mul $t7, $t5, $t9		# $t7 = number of sections * section length
+	add $t6, $t6, $t7
+	lw $t8, BRICK_ATTRIBUTES + 12	# $t8 = space between sections
+	mul $t7, $t8, $t9		# $t7 = space * number of sections
+	add $t7, $t7, $t8		# $t7 = space * (number of sections + 1)
+	add $t6, $t6, $t7		# $t6 = the start of n + 1th section = end
+	# inner loop index $t8
+	li $t9, MAX_X
+	lw $t8, WALL_ATTRIBUTES + 4	# $t8 = wall thickness
+	sub $t9, $t9, $t8		# $t9 = MAX_X - wall thickness	
+	sub $t9, $t9, $t6 		# $t9 = MAX_X - wall thickness - end = remaining empty space
+	div $t9, $t9, 2			# $t9 = (MAX_X - end) // 2
+	lw $t8, BRICK_ATTRIBUTES + 12	# $t8 = space
+	add $t8, $t8, $t3		# x = initial x + space
+	add $t8, $t8, $t9		# x = initial x + space + extra space // 2
+	# update end accordingly
+	add $t6, $t6, $t9		# inner loop end += extra space // 2
+	# initial section end in $t7
+	add $t7, $t8, $t5		# x + length
+init_bricks_inner_loop:
+	bge $t8, $t6, init_bricks_inner_loop_end	# if x >= inner loop end
+	# draw one sectio
+	# store the temporiries
 	addi $sp, $sp, -4
 	sw $t0, 0($sp)
 	addi $sp, $sp, -4
 	sw $t1, 0($sp)
 	addi $sp, $sp, -4
 	sw $t2, 0($sp)
-	# draw a brick
-	addi $sp, $sp, -4		# start
-	sw $s1, 0($sp)
-	addi $sp, $sp, -4		# end
-	sw $s2, 0($sp)
-	addi $sp, $sp, -4		# width
-	lw $t9, BRICK_ATTRIBUTES
+	addi $sp, $sp, -4
+	sw $t3, 0($sp)
+	addi $sp, $sp, -4
+	sw $t4, 0($sp)
+	addi $sp, $sp, -4
+	sw $t5, 0($sp)
+	addi $sp, $sp, -4
+	sw $t8, 0($sp)
+	addi $sp, $sp, -4
 	sw $t9, 0($sp)
+	# call the draw block function
+	addi $sp, $sp, -4		# start_x
+	sw $t8, 0($sp)
+	addi $sp, $sp, -4		# end_x
+	sw $t7, 0($sp)
+	addi $sp, $sp, -4		# y
+	sw $t4, 0($sp)
+	addi $sp, $sp, -4		# thickness
+	lw $t0, BRICK_ATTRIBUTES
+	sw $t0, 0($sp)
 	addi $sp, $sp, -4		# color
-	lw $t9, 0($t2)
-	sw $t9, 0($sp)
-	addi $sp, $sp, -4		# increment
-	li $t9, DISPLAY_WIDTH
-	sw $t9, 0($sp)
-	jal draw_block
-	# restore $t0, $t1, and $t2 from the stack
+	lw $t0, 0($t2)			# get color from the color addr
+	sw $t0, 0($sp)
+	jal draw_block_unit
+	# restore the temporaries
+	lw $t9, 0($sp)
+	addi $sp, $sp, 4
+	lw $t8, 0($sp)
+	addi $sp, $sp, 4
+	lw $t5, 0($sp)
+	addi $sp, $sp, 4
+	lw $t4, 0($sp)
+	addi $sp, $sp, 4
+	lw $t3, 0($sp)
+	addi $sp, $sp, 4
 	lw $t2, 0($sp)
 	addi $sp, $sp, 4
 	lw $t1, 0($sp)
 	addi $sp, $sp, 4
 	lw $t0, 0($sp)
 	addi $sp, $sp, 4
-	# update loop
-	addi $t0, $t0, 1
-	# update start and end
-	lw $t3, BRICK_ATTRIBUTES		# $t3 = brick thickness
-	lw $t4, BRICK_ATTRIBUTES + 4	# $t4 = space between bricks
-	add $t3, $t3, $t4		# $t3 = brick thickness + space between bricks
-	mul $t3, $t3, DISPLAY_WIDTH	# $t3 = (brick thickness + space between bricks) * DISPLAY_WIDTH
-	add $s1, $s1, $t3
-	add $s2, $s2, $t3
-	# update color
-	addi $t2, $t2, 4
-	j init_bricks_loop
-init_bricks_loop_end:
+	# save the bricks data
+	li $t9, 1
+	sw $t9, 0($s0)			# health
+	sw $t8, 4($s0)			# x0
+	sw $t4, 8($s0)			# y0
+	sw $t7, 12($s0)			# right x
+	lw $t9, BRICK_ATTRIBUTES		# $t9 = thickness
+	add $t9, $t9, $t4		# $t9 = y0 + thickness = lower y
+	sw $t9, 16($s0) 			# lower y
+	# updathe the bricks data bass addr
+	addi $s0, $s0, 20
+	# update the loop
+	# x = prev x end + space
+	lw $t9, BRICK_ATTRIBUTES + 12 	# space
+	add $t8, $t7, $t9
+	# x end = x + length
+	add $t7, $t8, $t5
+	j init_bricks_inner_loop
+init_bricks_inner_loop_end:
+	# update outer loop
+	addi $t2, $t2, 4			# update the color
+	# addi $t3, $t3, MAX_X		# update the x
+	lw $t5, BRICK_ATTRIBUTES		# update the y
+	add $t4, $t4, $t5		
+	lw $t5, BRICK_ATTRIBUTES + 8
+	add $t4, $t4, $t5
+	addi $t0, $t0, 1			# update loop index
+	j init_bricks_outer_loop
+	
+init_bricks_outer_loop_end:
 
-# registers: $s2: the starting height of the paddle
+# registers: $s0, $s1, $s2, $s3
 init_paddle:
-	# start position $s0
-	li $t0, DISPLAY_HEIGHT		#
-	li $t1, DISPLAY_WIDTH		# 
-	div $t0, $t0, UNIT_HEIGHT	# $t1 = DISPLAY_HEIGHT // UNIT_HEIGHT = height
-	lw $t9, PADDLE_ATTRIBUTES + 8
-	sub $t0, $t0, $t9		# $t0 is the starting height of the paddle
-	move $s2, $t0
-	mul $t0, $t0, $t1		# $t0 = DISPLAY_WIDTH * (height - paddle thickness)
-	div $t1, $t1, 2			# $t1 = DISPLAY_WIDTH // 2
-	lw $t2, PADDLE_ATTRIBUTES + 4	# $t2 = paddle length
-	mul $t2, $t2, UNIT_WIDTH
-	div $t2, $t2, 2			# $t2 = paddle length // 2
-	sub $t3, $t1, $t2		# $t3 = DISPLAY_WIDTH // 2 - paddle length // 2
-	add $s0, $t0, $t3		# $s0 = DISPLAY_WIDTH * (height - paddle thickness) + DISPLAY_WIDTH // 2 - paddle length // 2
-	# end position $s1
-	add $t3, $t1, $t2
-	add $s1, $t0, $t3
-	# draw the paddle
-	addi $sp, $sp, -4		# start
-	sw $s0, 0($sp)
-	addi $sp, $sp, -4		# end
-	sw $s1, 0($sp)
-	addi $sp, $sp, -4		# width
-	lw $t9, PADDLE_ATTRIBUTES + 8
-	sw $t9, 0($sp)
-	addi $sp, $sp, -4		# color
-	lw $t9, PADDLE_ATTRIBUTES
-	sw $t9, 0($sp)
-	addi $sp, $sp, -4		# increment
-	li $t9, DISPLAY_WIDTH
-	sw $t9, 0($sp)
-	jal draw_block
+	# $s0 = x0
+	li $t0, MAX_X
+	div $t0, $t0, 2			# $t0 = center of the screen
+	lw $t1, PADDLE_ATTRIBUTES + 4	# $t1 = paddle length
+	div $t1, $t1, 2			# $t1 = paddle length // 2
+	sub $s0, $t0, $t1		# $s0 = paddle start
+	# $s1 = right x
+	add $s1, $t0, $t1
+	# $s2 = y0
+	li $s2, MAX_Y
+	lw $t0, PADDLE_ATTRIBUTES + 8
+	sub $s2, $s2, $t0
+	# $s3 = lower y
+	li $s3, MAX_Y
+	# save
+	sw $s0, PADDLE_AABB
+	sw $s2, PADDLE_AABB + 4
+	sw $s1, PADDLE_AABB + 8
+	sw $s3, PADDLE_AABB + 12
+	lw $a0, PADDLE_ATTRIBUTES
+	jal clear_paddle
+	
 
-# registers: 
+# registers: $s0, $s1, $s2
 init_ball:
-	# start position $s0
-	lw $t0, BALL_ATTRIBUTES + 4	# $t0 = ball radius
-	mul $t1, $t0, 2			# $t1 = ball diameter (length and width)
-	sub $s2, $s2, $t1		# ball staring height = paddle starting height - ball diameter
-	mul $t0, $t0, UNIT_WIDTH		# $t0 = ball radius (in units)	
-	li $t2, DISPLAY_WIDTH
-	mul $t3, $t2, $s2		# $t3 = ball starting height * DISPLAY_WIDTH
-	div $t2, $t2, 2			# $t2 = DISPLAY_WIDTH // 2
-	sub $t4, $t2, $t0		# $t4 = DISPLAY_WIDTH // 2 - ball radius
-	add $s0, $t3, $t4		# $s0 = ball starting height * DISPLAY_WIDTH + DISPLAY_WIDTH // 2 - ball radius
-	# end position $s1
-	add $t4, $t2, $t0		# $t4 = DISPLAY_WIDTH // 2 + ball radius
-	add $s1, $t3, $t4		# $s0 = ball starting height * DISPLAY_WIDTH + DISPLAY_WIDTH // 2 + ball radius
-	# draw the paddle
-	addi $sp, $sp, -4		# start
-	sw $s0, 0($sp)
-	addi $sp, $sp, -4		# end
-	sw $s1, 0($sp)
-	addi $sp, $sp, -4		# width
-	sw $t1, 0($sp)
-	addi $sp, $sp, -4		# color
-	lw $t9, BALL_ATTRIBUTES
-	sw $t9, 0($sp)
-	addi $sp, $sp, -4		# increment
-	li $t9, DISPLAY_WIDTH
-	sw $t9, 0($sp)
-	jal draw_block
-
+	# $s0 = x0
+	li $t0, MAX_X
+	div $t0, $t0, 2
+	lw $t1, BALL_ATTRIBUTES + 4
+	sub $s0, $t0, $t1
+	# $s1 = right x
+	add $s1, $t0, $t1
+	# $s2 = y0
+	lw $t0, BALL_ATTRIBUTES + 4
+	mul $t0, $t0, 2
+	sub $s2, $s2, $t0
+	add $s2, $s2, -1
+	# $s3 = lower y
+	add $s3, $s2, $t0
+	# save
+	sw $s0, BALL_AABB
+	sw $s2, BALL_AABB + 4
+	sw $s1, BALL_AABB + 8
+	sw $s3, BALL_AABB + 12
+	lw $a0, BALL_ATTRIBUTES
+	jal clear_ball
+	
 	j game_loop
 
 ##############################################################################
-# FUNCTIONS FOR INITIALIZATIONS
+# GAME LOOP
 ##############################################################################
+
+# for paddle, we clear it only if its position changed
+game_loop:
+	# 1a. Check if key has been pressed
+    	# 1b. Check which key has been pressed
+    	lw $s0, ADDR_KBRD		# $s0 = the keyboard address
+	lw $t0, 0($s0)			# $t0
+    	beq $t0, 1, process_input 	# if $t0 == 1, then we process the keyboard input
+after_process_input:
+	lw $t0, GAME_STATUS
+	beq $t0, 0, game_loop		# if the game has not started yet, then jump back to game_loop
+
+	# 2a. Check for collisions
+	# check for wall collisions
+	# get part of AABB of the ball
+	lw $t0, BALL_AABB		# x0
+	lw $t1, BALL_AABB + 4		# y0
+	lw $t2, BALL_AABB + 8		# right x
+	# collide with top wall
+	lw $t3, WALL_AABB		# top wall
+	ble $t1, $t3, do_collision_1
+	# left wall
+	lw $t3, WALL_AABB + 4
+	ble $t0, $t3, do_collision_2
+	# right wall
+	lw $t3, WALL_AABB + 8
+	bge $t2, $t3, do_collision_2
+
+	# paddle collision
+	la $a0, BALL_AABB
+	la $a1, PADDLE_AABB
+	jal is_collide
+	# if no collisions 
+	beq $v0, 0, brick_collisions
+	# if collide
+	beq $v1, 1, do_collision_1
+	beq $v1, 2, do_collision_2
+	beq $v1, 3, do_collision_3
+	
+brick_collisions:
+	# brick collisions
+	la $t0, BRICKS_DATA
+	lw $t1, BRICK_ATTRIBUTES + 4
+	mul $t1, $t1, 7
+	mul $t1, $t1, 20
+	add $t1, $t1, $t0
+brick_collision_loop:
+	beq $t0, $t1, brick_collision_loop_end
+	lw $t2, 0($t0)			# $t2 = health
+	# if health = 0, then we jump to unhealthy
+	beq $t2, 0, brick_collision_loop_unhealthy
+	# if healthy, then we decide collision
+	# decide if there is a collision
+	la $a0, BALL_AABB
+	addi $a1, $t0, 4
+	# save temps
+	addi $sp, $sp -4
+	sw $t0, 0($sp)
+	addi $sp, $sp -4
+	sw $t1, 0($sp)
+	jal is_collide
+	# restore temps
+	lw $t1, 0($sp)
+	addi $sp, $sp, 4
+	lw $t0, 0($sp)
+	addi $sp, $sp, 4
+	# if no collisions 
+	beq $v0, 0, brick_collision_loop_unhealthy
+	# if collide
+	# set health to 0
+	li $t2, 0
+	sw $t2, 0($t0)
+	jal clear_bricks
+	beq $v1, 1, do_collision_1
+	beq $v1, 2, do_collision_2
+	beq $v1, 3, do_collision_3
+brick_collision_loop_unhealthy:
+	# update the loop
+	add $t0, $t0, 20
+	j brick_collision_loop
+brick_collision_loop_end:
+
+	# otherwise, no collisions
+	j update_locations
+# top collision
+do_collision_1:
+	# invert vertically
+	lw $t0, BALL_DIRECTION + 4
+	mul $t1, $t0, 2
+	sub $t0, $t0, $t1
+	sw $t0, BALL_DIRECTION + 4
+	j update_locations
+do_collision_2:
+	# invert horizontally
+	lw $t0, BALL_DIRECTION
+	mul $t1, $t0, 2
+	sub $t0, $t0, $t1
+	sw $t0, BALL_DIRECTION
+	j update_locations
+do_collision_3:
+	# invert both
+	lw $t0, BALL_DIRECTION
+	mul $t1, $t0, 2
+	sub $t0, $t0, $t1
+	sw $t0, BALL_DIRECTION
+	lw $t0, BALL_DIRECTION + 4
+	mul $t1, $t0, 2
+	sub $t0, $t0, $t1
+	sw $t0, BALL_DIRECTION + 4
+	j update_locations
+
+update_locations:
+	# 2b. Update locations (paddle, ball)
+	# game start
+	# clear the previous ball pos
+	li $a0, 0x000000
+	jal clear_ball
+	# start moving the ball
+	jal move_ball
+	
+	# CHEAT: move the paddel accordingly
+	li $a0, 0x000000
+	jal clear_paddle
+	lw $a0, BALL_DIRECTION
+	jal move_paddle
+	
+	# 3. Draw the screen
+	jal draw_screen
+	
+	# 4. Sleep
+	li $v0, 32
+	li $a0, 16
+	syscall
+	
+	# 5. Go back to 1
+	j game_loop
+	
+	#li $v0, 10
+	#syscall
+	
+draw_screen:
+	# save the $ra
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+
+	# draw the ball
+	lw $a0, BALL_ATTRIBUTES
+	jal clear_ball
+
+	# redraw the paddle
+	lw $a0, PADDLE_ATTRIBUTES 	# default paddle color
+	jal clear_paddle
+
+	# restore the return addr and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+	
+process_input:
+	lw $t0, 4($s0)
+	# start the game
+	# if key is "s"
+	beq $t0, 0x73, process_input_s
+	
+	# paddle movement
+	# if key is "a"
+	beq $t0, 0x61, process_input_a
+	# if key is "d"
+	beq $t0, 0x64, process_input_d
+	
+	# ball cheat movement
+	# if key is "i"
+	beq $t0, 0x69, process_input_i
+	# if key is "k"
+	beq $t0, 0x6B, process_input_k
+	# if key is "j"
+	beq $t0, 0x6A, process_input_j
+	# if key is "l"
+	beq $t0, 0x6C, process_input_l
+	# if key is "u"
+	beq $t0, 0x75, process_input_u
+	# if key is "o"
+	beq $t0, 0x6F, process_input_o
+	# if key is "m"
+	beq $t0, 0x6D, process_input_m
+	# if key is "."
+	beq $t0, 0x2E, process_input_dot
+	
+	j after_process_input
+
+# start the game
+process_input_s:
+	# mark the GAME_STATUS
+	li $t0, 1
+	sw $t0, GAME_STATUS
+	j after_process_input
+
+# move the paddle
+process_input_a:
+clear_screen_a:
+	# clear the paddle
+	li $a0, 0x000000
+	jal clear_paddle
+
+	# move the paddle leftward 5 unit
+	li $a0, -5
+	jal move_paddle
+	
+	j after_process_input
+	
+process_input_d:
+clear_screen_d:
+	# clear the paddle
+	li $a0, 0x000000
+	jal clear_paddle
+
+	# move the paddle leftward 5 unit
+	li $a0, 5
+	jal move_paddle
+	
+	j after_process_input
+	
+# move the ball upward
+process_input_i:
+	# move the ball upward
+	li $t0, 0
+	li $t1, -1
+	sw $t0, BALL_DIRECTION
+	sw $t1, BALL_DIRECTION + 4
+	
+	j after_process_input
+	
+# move the ball downward
+process_input_k:
+	# move the ball downward
+	li $t0, 0
+	li $t1, 1
+	sw $t0, BALL_DIRECTION
+	sw $t1, BALL_DIRECTION + 4
+	
+	j after_process_input
+
+# move the ball leftward
+process_input_j:
+	# move the ball leftward
+	li $t0, -1
+	li $t1, 0
+	sw $t0, BALL_DIRECTION
+	sw $t1, BALL_DIRECTION + 4
+	
+	j after_process_input
+	
+# move the ball rightward
+process_input_l:
+	# move the ball rightward
+	li $t0, 1
+	li $t1, 0
+	sw $t0, BALL_DIRECTION
+	sw $t1, BALL_DIRECTION + 4
+	
+	j after_process_input
+
+# move the ball left up 
+process_input_u:
+	# move the ball leftward up
+	li $t0, -1
+	li $t1, -1
+	sw $t0, BALL_DIRECTION
+	sw $t1, BALL_DIRECTION + 4
+	
+	j after_process_input
+	
+# move the ball right up 
+process_input_o:
+	# move the ball rightward up
+	li $t0, 1
+	li $t1, -1
+	sw $t0, BALL_DIRECTION
+	sw $t1, BALL_DIRECTION + 4
+	
+	j after_process_input
+
+# move the ball left down
+process_input_m:
+	# move the ball leftward down
+	li $t0, -1
+	li $t1, 1
+	sw $t0, BALL_DIRECTION
+	sw $t1, BALL_DIRECTION + 4
+	
+	j after_process_input
+
+# move the ball right down
+process_input_dot:
+	# move the ball rightward down
+	li $t0, 1
+	li $t1, 1
+	sw $t0, BALL_DIRECTION
+	sw $t1, BALL_DIRECTION + 4
+	
+	j after_process_input
+
+##############################################################################
+# FUNCTIONS
+##############################################################################
+	
+# decide if two AABBs collide
+# parameter: $a0 = the addr of AABB1, $a2 = the addr of AABB2
+# returns: $v0 = if collided, $v1 = the colission type, -1 if not collide
+# collision type 1 = flip vertically
+# collision type 2 = flip horizontally
+# collision type 3 = flip both
+# registers: $t0 - $t7
+is_collide:
+	# save variables
+	addi $sp, $sp, -4
+	sw $s0, 0($sp)
+	addi $sp, $sp, -4
+	sw $s1, 0($sp)
+	addi $sp, $sp, -4
+	sw $s2, 0($sp)
+	addi $sp, $sp, -4
+	sw $s3, 0($sp)
+	addi $sp, $sp, -4
+	sw $s4, 0($sp)
+	# get AABBs
+	lw $t0, 0($a0)				# $t0 = x0 of AABB1
+	lw $t1, 4($a0)				# $t1 = y0 of AABB1
+	lw $t2, 8($a0)				# $t2 = right x of AABB1
+	lw $t3, 12($a0)				# $t3 = lower y of AABB1
+	
+	lw $t4, 0($a1)				# $t4 = x0 of AABB2
+	lw $t5, 4($a1)				# $t5 = y0 of AABB2
+	lw $t6, 8($a1)				# $t6 = right x of AABB2
+	lw $t7, 12($a1)				# $t7 = lower y of AABB2
+	
+	# collision on x?
+	sgeu $s0, $t2, $t4
+	sgeu $s1, $t6, $t0
+	and $s2, $s0, $s1
+	# collision on y?
+	sgeu $s0, $t3, $t5
+	sgeu $s1, $t7, $t1
+	and $s3, $s0, $s1
+	# if collide, type?
+	and $s4, $s2, $s3
+	# if collide
+	beq $s4, 1, is_collide_true
+	# if not collide
+	li $v0, 0
+	li $v1, -1
+	j is_collide_end
+is_collide_true:
+	# decide which type
+	# if the at least one distance between lower y1 and y02, or between y01 and lower y2 is 0, then it is a type 1
+	sub $s0, $t1, $t7			# $s0 = y01 - lower y2
+	sub $s1, $t3, $t5			# $s1 = lower y1 - y02
+	and $s2, $s0, $s1			# $s2 = 0 iff at least one of them is zero
+	# at least one 0, go type 1
+	beq $s2, 0, is_collide_type1
+	# if the at least one distance between right x1 and x02, or between x01 and right x2 is 0, then it is a type 2
+	sub $s0, $t0, $t6			# $s0 = x01 - right x2
+	sub $s1, $t2, $t4			# $s1 = right x1 - x02
+	and $s2, $s0, $s1			# $s2 = 0 iff at least one of them is zero
+	# at least one 0, go type 2
+	beq $s2, 0, is_collide_type2
+	# otherwise, type 3
+	li $v0, 1
+	li $v1, 3
+	j is_collide_end
+is_collide_type1:
+	li $v0, 1
+	li $v1, 1
+	j is_collide_end
+is_collide_type2:
+	li $v0, 1
+	li $v1, 2
+	j is_collide_end
+is_collide_end:
+	# restore variables
+	lw $s4, 0($sp)
+	addi $sp, $sp, 4
+	lw $s3, 0($sp)
+	addi $sp, $sp, 4
+	lw $s2, 0($sp)
+	addi $sp, $sp, 4
+	lw $s1, 0($sp)
+	addi $sp, $sp, 4
+	lw $s0, 0($sp)
+	addi $sp, $sp, 4
+	# return the function
+	jr $ra
+
+# move the ball with x movement and y movement. +x = right, -x = left, +y = down, -y = up
+# registers: $t0 - $t3
+move_ball:
+	lw $a0, BALL_DIRECTION
+	lw $a1, BALL_DIRECTION + 4
+
+	# current AABB of the ball
+	lw $t0, BALL_AABB			# $t0 = x0
+	lw $t1, BALL_AABB + 4			# $t1 = y0
+	lw $t2, BALL_AABB + 8			# $t2 = right x
+	lw $t3, BALL_AABB + 12			# $t3 = lower y
+
+	# move the ball vertically
+	add $t1, $t1, $a1
+	add $t3, $t3, $a1
+	
+	# move the ball horizontally
+	add $t0, $t0, $a0
+	add $t2, $t2, $a0
+	
+	# save the new AABB
+	sw $t0, BALL_AABB			# $t0 = x0
+	sw $t1, BALL_AABB + 4			# $t1 = y0
+	sw $t2, BALL_AABB + 8			# $t2 = right x
+	sw $t3, BALL_AABB + 12			# $t3 = lower y
+	
+	jr $ra
+
+
+# parameters: $a0 = color
+# registers: $t0, $t1, $t2, $t3, $t4, $t5, $t8, $t9
+clear_ball:
+	# save the return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	# save the saved variables
+	addi $sp, $sp, -4
+	sw $s0, 0($sp)
+	addi $sp, $sp, -4
+	sw $s1, 0($sp)
+	addi $sp, $sp, -4
+	sw $s2, 0($sp)
+	# clear the ball
+	# get the coordinates of the paddle
+	lw $s0, BALL_AABB + 0		# upper left x
+	lw $s2, BALL_AABB + 4		# y
+	lw $s1, BALL_AABB + 8		# right x 
+	# call the draw block function
+	addi $sp, $sp, -4		# start_x
+	sw $s0, 0($sp)
+	addi $sp, $sp, -4		# end_x
+	sw $s1, 0($sp)
+	addi $sp, $sp, -4		# y
+	sw $s2, 0($sp)
+	addi $sp, $sp, -4		# thickness
+	lw $t0, BALL_ATTRIBUTES + 4
+	mul $t0, $t0, 2
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4		# color	
+	sw $a0, 0($sp)
+	jal draw_block_unit
+	# restore the saved variables
+	lw $s2, 0($sp)
+	addi $sp, $sp, 4
+	lw $s1, 0($sp)
+	addi $sp, $sp, 4
+	lw $s0, 0($sp)
+	addi $sp, $sp, 4
+	# restore the return addr
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	# return
+	jr $ra
+
+# parameters: $a0 = color
+# registers: $t0, $t1, $t2, $t3, $t4, $t5, $t8, $t9
+clear_paddle:
+	# save the return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	# save the saved variables
+	addi $sp, $sp, -4
+	sw $s0, 0($sp)
+	addi $sp, $sp, -4
+	sw $s1, 0($sp)
+	addi $sp, $sp, -4
+	sw $s2, 0($sp)
+	# get the coordinates of the paddle
+	lw $s0, PADDLE_AABB + 0			# upper left x
+	lw $s2, PADDLE_AABB + 4			# y
+	lw $s1, PADDLE_AABB + 8			# right x 
+	# call the draw block function
+	addi $sp, $sp, -4		# start_x
+	sw $s0, 0($sp)
+	addi $sp, $sp, -4		# end_x
+	sw $s1, 0($sp)
+	addi $sp, $sp, -4		# y
+	sw $s2, 0($sp)
+	addi $sp, $sp, -4		# thickness
+	lw $t0, PADDLE_ATTRIBUTES + 8
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4		# color		
+	sw $a0, 0($sp)
+	jal draw_block_unit
+	# restore the saved variables
+	lw $s2, 0($sp)
+	addi $sp, $sp, 4
+	lw $s1, 0($sp)
+	addi $sp, $sp, 4
+	lw $s0, 0($sp)
+	addi $sp, $sp, 4
+	# restore the return addr
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	# return
+	jr $ra
+	
+# move the paddle with x movemen. +x = right, -x = left
+# registers: $t0 - $t3
+move_paddle:
+	# current AABB of the paddle
+	lw $t0, PADDLE_AABB			# $t0 = x0
+	lw $t1, PADDLE_AABB + 8			# $t1 = right x
+	
+	# we need |a0|
+	abs $t3, $a0
+	# if a0 < 0
+	blt $a0, 0, move_paddle_1
+	# if a0 > 0
+	bgt $a0, 0, move_paddle_2
+	# if a0 == 0
+	j move_paddle_end
+move_paddle_1:
+	lw $t2, WALL_AABB + 4			# left bound
+	sub $t2, $t0, $t2			# $t2 = x0 - left bound = gap
+	# if the gap < t3, then we change a0
+	ble $t2, $t3, move_paddle_special_1
+	j move_paddle_end
+move_paddle_special_1:
+	mul $t2, $t2, -1
+	move $a0, $t2
+	j move_paddle_end
+move_paddle_2:
+	lw $t2, WALL_AABB + 8			# right bound
+	sub $t2, $t2, $t1			# $t2 = right bound - right x = gap
+	# if the gap < t3, then we change a0
+	ble $t2, $t3, move_paddle_special_2
+	j move_paddle_end
+move_paddle_special_2:
+	move $a0, $t2
+	j move_paddle_end
+move_paddle_end:
+	# move the paddle horizontally
+	add $t0, $t0, $a0
+	add $t1, $t1, $a0
+	
+	# save the new AABB
+	sw $t0, PADDLE_AABB			# $t0 = x0
+	sw $t1, PADDLE_AABB + 8			# $t1 = right x
+	
+	jr $ra
+
+
+# the coordinate system is constructed as the upper left corner = (0, 0), lower right corner = (DISPLAY_WIDTH / UNIT_WIDTH, ...)
+# parameters: x, y
+# return values: the number of units given x and y
+# registers: $t8, $t9
+coordinate_to_display:
+	# pop parameters from the stack
+	lw $t9, 0($sp)			# y
+	addi $sp, $sp, 4
+	lw $t8, 0($sp)			# x
+	addi $sp, $sp, 4
+	# convert
+	mul $t9, $t9, DISPLAY_WIDTH	# $t9 = DISPLAY_WIDTH * y
+	mul $t8, $t8, UNIT_WIDTH		# $t8 = x * UNIT_WIDTH
+	add $t8, $t8, $t9		# $t8 = x * UNIT_WIDTH + DISPLAY_WIDTH * y
+	# push the return value
+	addi $sp, $sp, -4
+	sw $t8, 0($sp)
+	jr $ra 				# return the function
 
 # parameters: start, end, increment, color
 # 	      $a0,  $a1,  $a2	    $a3
-# preconditions: $s7 is the base address of the display
 # registers: $t0, $t1
 draw_row:
+	# push $s7 to the stack
+	addi $sp, $sp, -4
+	sw $s7, 0($sp)
+	lw $s7, ADDR_DSPL		# $s7 = the display base address
 	add $t0, $a0, $zero
 draw_row_loop:
 	beq $t0, $a1, draw_row_loop_end	# ...
@@ -288,31 +945,53 @@ draw_row_loop:
 	add $t0, $t0, $a2		# update the loop index, index = index + UNIT_WIDTH
 	j draw_row_loop
 draw_row_loop_end:
+	# restore $s7 from the stack
+	lw $s7, 0($sp)
+	addi $sp, $sp, 4
 	jr $ra				# return the function
-
+	
 # draw_block will draw a block with length specified by start and end, and width specified by width.
+# end_x is exclusive
 # preconditions: $s7 is the base address of the display
-# parameters: start, end, width, color, increment
-# registers: $t0, $t1, $t2, $t3, $t4, $t5
-draw_block:
+# parameters: start_x, end_x, y, width, color
+# registers: $t0, $t1, $t2, $t3, $t4, $t5, $t8, $t9
+draw_block_unit:
 	# pop parameters from the stack
-	lw $t4, 0($sp)			# $t4 = increment
+	lw $t4, 0($sp)			# $t4 = color
 	addi $sp, $sp, 4
-	lw $t3, 0($sp)			# $t3 = color
+	lw $t3, 0($sp)			# $t3 = width
 	addi $sp, $sp, 4
-	lw $t2, 0($sp)			# $t2 = width
+	lw $t2, 0($sp)			# $t2 = y
 	addi $sp, $sp, 4
-	lw $t1, 0($sp)			# $t1 = end
+	lw $t1, 0($sp)			# $t1 = end_x
 	addi $sp, $sp, 4
-	lw $t0, 0($sp)			# $t0 = start
+	lw $t0, 0($sp)			# $t0 = start_x
 	addi $sp, $sp, 4
-	# loop setup
-	move $t5, $zero			# $t5 = loop index start from 0
 	# store the return address
 	addi $sp, $sp, -4
 	sw $ra, 0($sp)
-draw_block_loop:
-	beq $t5, $t2, draw_block_end
+	# calculate the start in display
+	addi $sp, $sp, -4
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4
+	sw $t2, 0($sp)
+	jal coordinate_to_display
+	# get the return value
+	lw $t0, 0($sp)			# $t0 = start_x
+	addi $sp, $sp, 4
+	# calculate the end in display
+	addi $sp, $sp, -4
+	sw $t1, 0($sp)
+	addi $sp, $sp, -4
+	sw $t2, 0($sp)
+	jal coordinate_to_display
+	# get the return value
+	lw $t1, 0($sp)			# $t1 = end_x
+	addi $sp, $sp, 4
+	# loop setup
+	move $t5, $zero			# $t5 = loop index start from 0
+draw_block_loop_unit:
+	beq $t5, $t3, draw_block_end_unit
 	# draw one line
 	# store $t0 and $t1 in the stack
 	addi $sp, $sp, -4
@@ -323,7 +1002,7 @@ draw_block_loop:
 	move $a0, $t0			# start pixel
 	move $a1, $t1			# end pixel
 	li $a2, UNIT_WIDTH		# increment is always the UNIT_WIDTH because we draw horizontal line by line
-	move $a3, $t3			# color
+	move $a3, $t4			# color
 	jal draw_row
 	# restore $t0 and $t1 from the stack
 	lw $t1, 0($sp)
@@ -331,30 +1010,112 @@ draw_block_loop:
 	lw $t0, 0($sp)
 	addi $sp, $sp, 4
 	# update start $t0 and end $t1
-	add $t0, $t0, $t4
-	add $t1, $t1, $t4
+	li $t9, MAX_X
+	mul $t9, $t9, UNIT_WIDTH
+	add $t0, $t0, $t9
+	add $t1, $t1, $t9
 	# update loop
 	addi $t5, $t5, 1
-	j draw_block_loop
-draw_block_end:
+	j draw_block_loop_unit
+draw_block_end_unit:
 	# restore the return address from the stack
 	lw $ra, 0($sp)
 	addi $sp, $sp, 4
 	jr $ra
-
-
-##############################################################################
-# GAME LOOP
-##############################################################################
-
-game_loop:
-	# 1a. Check if key has been pressed
-    	# 1b. Check which key has been pressed
-   	# 2a. Check for collisions
-	# 2b. Update locations (paddle, ball)
-	# 3. Draw the screen
-	# 4. Sleep
-
-	#j game_loop	#5. Go back to 1
-	li $v0, 10
-	syscall
+	
+# clear the bricks 
+# registers: $t0 - $t5, $t8 - $t9
+clear_bricks:
+	# store the ra
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	li $t0, 0			# loop index from 0 to 7 - 1
+	li $t1, 7			# loop end	
+# draw each row of the brick
+clear_bricks_outer_loop:
+	beq $t0, $t1, clear_bricks_end
+	li $t2, 0			# inner loop index from 0 to number of sections - 1
+	lw $t3, BRICK_ATTRIBUTES + 4	# inner loop end
+clear_bricks_inner_loop:
+	beq $t2, $t3, clear_bricks_inner_loop_end
+	# if health == 0, then we set the color to black, else the normal color
+	la $t4, BRICKS_DATA		# the base addr of BRICKS_DATA
+	lw $t5, BRICK_ATTRIBUTES + 4
+	mul $t5, $t5, 20
+	mul $t5, $t0, $t5
+	mul $t6, $t2, 20
+	add $t5, $t5, $t6
+	add $t4, $t4, $t5		# $t4 = current brick data
+	lw $t5, 0($t4)			# $t5 = health
+	# if health is not 0
+	bne $t5, 0, clear_bricks_health_normal
+	# if health is 0
+	li $t9, 0x000000			# $t9 = color black
+	j clear_bricks_draw_brick
+clear_bricks_health_normal:
+	# if health is not 0, set color to the normal color
+	la $t9, BRICK_ATTRIBUTES + 16	# $t9 = starting color addr
+	mul $t8, $t0, 4
+	add $t9, $t9, $t8		# $t9 = current color addr
+	lw $t9, 0($t9)			# $t9 = current color
+	j clear_bricks_draw_brick
+clear_bricks_draw_brick:
+	# draw one brick
+	# store the temporaries
+	addi $sp, $sp, -4
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4
+	sw $t1, 0($sp)
+	addi $sp, $sp, -4
+	sw $t2, 0($sp)
+	addi $sp, $sp, -4
+	sw $t3, 0($sp)
+	addi $sp, $sp, -4
+	sw $t4, 0($sp)
+	addi $sp, $sp, -4
+	sw $t9, 0($sp)
+	# call the draw block function
+	addi $sp, $sp, -4		# start_x
+	lw $t0, 4($t4)
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4		# end_x
+	lw $t0, 12($t4)
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4		# y
+	lw $t0, 8($t4)
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4		# thickness
+	lw $t0, BRICK_ATTRIBUTES
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4		# color		
+	sw $t9, 0($sp)
+	jal draw_block_unit
+	
+	# restore the temporaries
+	lw $t9, 0($sp)
+	addi $sp, $sp, 4
+	lw $t4, 0($sp)
+	addi $sp, $sp, 4
+	lw $t3, 0($sp)
+	addi $sp, $sp, 4
+	lw $t2, 0($sp)
+	addi $sp, $sp, 4
+	lw $t1, 0($sp)
+	addi $sp, $sp, 4
+	lw $t0, 0($sp)
+	addi $sp, $sp, 4
+	
+	# update the inner loop
+	addi $t2, $t2, 1
+	j clear_bricks_inner_loop
+clear_bricks_inner_loop_end:
+	# update the outer loop
+	addi $t0, $t0, 1
+	j clear_bricks_outer_loop
+clear_bricks_end:
+	# restore the ra
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	# return 
+	jr $ra
+	
