@@ -33,11 +33,24 @@ WALL_ATTRIBUTES:
 	.word 0xc7c1b5	# the color
 	.word 6		# the thinckness
 	
+PADDLE_ATTRIBUTES:
+	.word 0x01cc34	# paddle color
+	.word 14		# paddle length, in units, should be divisible by 2
+	.word 2		# paddle thickness, in units
+	
+BALL_ATTRIBUTES:
+	.word 0xFFFFFF	# ball color
+	.word 2		# ball radius
+
+##############################################################################
+# Mutable Data
+##############################################################################
+
 # The attributes of the bricks.
 # we have a total of 7 rows of bricks
 # the brick collision need also be modified
 BRICK_ATTRIBUTES:
-	.word 2		# thickness of the bricks, in units
+	.word 4		# thickness of the bricks, in units
 	.word 8		# the number of sections per brick
 	.word 1		# space between rows, in units
 	.word 1		# space between sections, in units
@@ -48,19 +61,6 @@ BRICK_ATTRIBUTES:
 	.word 0x0000FF
 	.word 0x4B0082
 	.word 0x9400D3
-	
-PADDLE_ATTRIBUTES:
-	.word 0x01cc34	# paddle color
-	.word 14		# paddle length, in units, should be divisible by 2
-	.word 2		# paddle thickness, in units
-	
-BALL_ATTRIBUTES:
-	.word 0xFFFFFF	# ball color
-	.word 1		# ball radius
-
-##############################################################################
-# Mutable Data
-##############################################################################
 
 GAME_STATUS: 
 	.word 0		# 0 = stop, 1 = start
@@ -85,13 +85,16 @@ PADDLE_AABB:
 	.word 0:4	# upper left x0, y0, upper right x, lower left y
 
 # brick AABBs
-# we have 7 (row) * 2 (sections per row) = 14 bricks.
+# we have 7 (row) * 9 (sections per row) = 63 bricks.
 # Each brick object consists of 
 # the health (1 integer) and the AABB (4 integers)
-# so there are 14 * 5 = 70 integers
+# so there are 63 * 5 = 315 integers
 # if the health is 0, then we don't display and collide the brick
 BRICKS_DATA:
-	.word 0:70
+	.word 0:315
+	
+BRICK_SOUND_PITCH_OFFSET:
+	.word 0
 
 ##############################################################################
 # Code
@@ -106,6 +109,7 @@ BRICKS_DATA:
 	# Run the Brick Breaker game.
 main:
 
+init:
 init_walls:
 	# init walls
 	# top walls
@@ -220,7 +224,7 @@ init_bricks_outer_loop:
 	add $t7, $t8, $t5		# x + length
 init_bricks_inner_loop:
 	bge $t8, $t6, init_bricks_inner_loop_end	# if x >= inner loop end
-	# draw one sectio
+	# draw one section
 	# store the temporiries
 	addi $sp, $sp, -4
 	sw $t0, 0($sp)
@@ -270,7 +274,8 @@ init_bricks_inner_loop:
 	lw $t0, 0($sp)
 	addi $sp, $sp, 4
 	# save the bricks data
-	li $t9, 1
+	li $t9, 7
+	sub $t9, $t9, $t0
 	sw $t9, 0($s0)			# health
 	sw $t8, 4($s0)			# x0
 	sw $t4, 8($s0)			# y0
@@ -374,13 +379,13 @@ after_process_input:
 	lw $t2, BALL_AABB + 8		# right x
 	# collide with top wall
 	lw $t3, WALL_AABB		# top wall
-	ble $t1, $t3, do_collision_1
+	ble $t1, $t3, do_collision_top_wall
 	# left wall
 	lw $t3, WALL_AABB + 4
-	ble $t0, $t3, do_collision_2
+	ble $t0, $t3, do_collision_side_wall
 	# right wall
 	lw $t3, WALL_AABB + 8
-	bge $t2, $t3, do_collision_2
+	bge $t2, $t3, do_collision_side_wall
 
 	# paddle collision
 	la $a0, BALL_AABB
@@ -388,6 +393,7 @@ after_process_input:
 	jal is_collide
 	# if no collisions 
 	beq $v0, 0, brick_collisions
+	jal play_paddle_sound
 	# if collide
 	beq $v1, 1, do_collision_1
 	beq $v1, 2, do_collision_2
@@ -422,9 +428,21 @@ brick_collision_loop:
 	addi $sp, $sp, 4
 	# if no collisions 
 	beq $v0, 0, brick_collision_loop_unhealthy
+	# save temps
+	addi $sp, $sp -4
+	sw $t0, 0($sp)
+	addi $sp, $sp -4
+	sw $t1, 0($sp)
+	jal play_brick_sound
+	# restore temps
+	lw $t1, 0($sp)
+	addi $sp, $sp, 4
+	lw $t0, 0($sp)
+	addi $sp, $sp, 4
 	# if collide
-	# set health to 0
-	li $t2, 0
+	# health - 1
+	lw $t2, 0($t0)
+	addi $t2, $t2 -1
 	sw $t2, 0($t0)
 	jal clear_bricks
 	beq $v1, 1, do_collision_1
@@ -439,12 +457,19 @@ brick_collision_loop_end:
 	# otherwise, no collisions
 	j update_locations
 # top collision
+do_collision_top_wall:
+	jal play_wall_sound
+	j do_collision_1
+do_collision_side_wall:
+	jal play_wall_sound
+	j do_collision_2
 do_collision_1:
 	# invert vertically
 	lw $t0, BALL_DIRECTION + 4
 	mul $t1, $t0, 2
 	sub $t0, $t0, $t1
 	sw $t0, BALL_DIRECTION + 4
+	
 	j update_locations
 do_collision_2:
 	# invert horizontally
@@ -452,6 +477,7 @@ do_collision_2:
 	mul $t1, $t0, 2
 	sub $t0, $t0, $t1
 	sw $t0, BALL_DIRECTION
+	
 	j update_locations
 do_collision_3:
 	# invert both
@@ -463,6 +489,7 @@ do_collision_3:
 	mul $t1, $t0, 2
 	sub $t0, $t0, $t1
 	sw $t0, BALL_DIRECTION + 4
+	
 	j update_locations
 
 update_locations:
@@ -485,8 +512,8 @@ update_locations:
 	
 	# 4. Sleep
 	li $v0, 32
-	li $a0, 16
-	syscall
+	li $a0, 0
+	syscall 
 	
 	# 5. Go back to 1
 	j game_loop
@@ -517,6 +544,32 @@ process_input:
 	# start the game
 	# if key is "s"
 	beq $t0, 0x73, process_input_s
+	# quit the game
+	# if key is "s"
+	beq $t0, 0x71, process_input_q
+	# pause the game
+	# if key is "p"
+	beq $t0, 0x70, process_input_p
+	
+	# change levels of the game
+	# if key is "1"
+	beq $t0, 0x31, process_input_1
+	# if key is "2"
+	beq $t0, 0x32, process_input_2
+	# if key is "3"
+	beq $t0, 0x33, process_input_3
+	# if key is "4"
+	beq $t0, 0x34, process_input_4
+	# if key is "5"
+	beq $t0, 0x35, process_input_5
+	# if key is "6"
+	beq $t0, 0x36, process_input_6
+	# if key is "7"
+	beq $t0, 0x37, process_input_7
+	# if key is "8"
+	beq $t0, 0x38, process_input_8
+	# if key is "9"
+	beq $t0, 0x39, process_input_9
 	
 	# paddle movement
 	# if key is "a"
@@ -550,6 +603,118 @@ process_input_s:
 	li $t0, 1
 	sw $t0, GAME_STATUS
 	j after_process_input
+	
+# quit the game
+process_input_q:
+	# mark the GAME_STATUS
+	li $t0, 0
+	sw $t0, GAME_STATUS
+	
+	jal reset_display
+	
+	li $v0, 10
+	syscall
+	
+	j after_process_input
+
+# pause the game
+process_input_p:
+	# mark the GAME_STATUS
+	lw $t0, GAME_STATUS
+	not $t0, $t0
+	and $t0, $t0, 1
+	sw $t0, GAME_STATUS
+	j after_process_input
+
+# switch level 1
+process_input_1:
+	# mark the GAME_STATUS
+	li $t0, 0
+	sw $t0, GAME_STATUS
+	jal reset_display
+	li $t0, 1
+	sw $t0, BRICK_ATTRIBUTES + 4
+	j init
+	
+# switch level 2
+process_input_2:
+	# mark the GAME_STATUS
+	li $t0, 0
+	sw $t0, GAME_STATUS
+	jal reset_display
+	li $t0, 2
+	sw $t0, BRICK_ATTRIBUTES + 4
+	j init
+	
+# switch level 3
+process_input_3:
+	# mark the GAME_STATUS
+	li $t0, 0
+	sw $t0, GAME_STATUS
+	jal reset_display
+	li $t0, 3
+	sw $t0, BRICK_ATTRIBUTES + 4
+	j init
+	
+# switch level 4
+process_input_4:
+	# mark the GAME_STATUS
+	li $t0, 0
+	sw $t0, GAME_STATUS
+	jal reset_display
+	li $t0, 4
+	sw $t0, BRICK_ATTRIBUTES + 4
+	j init
+	
+# switch level 5
+process_input_5:
+	# mark the GAME_STATUS
+	li $t0, 0
+	sw $t0, GAME_STATUS
+	jal reset_display
+	li $t0, 5
+	sw $t0, BRICK_ATTRIBUTES + 4
+	j init
+	
+# switch level 6
+process_input_6:
+	# mark the GAME_STATUS
+	li $t0, 0
+	sw $t0, GAME_STATUS
+	jal reset_display
+	li $t0, 6
+	sw $t0, BRICK_ATTRIBUTES + 4
+	j init
+	
+# switch level 7
+process_input_7:
+	# mark the GAME_STATUS
+	li $t0, 0
+	sw $t0, GAME_STATUS
+	jal reset_display
+	li $t0, 7
+	sw $t0, BRICK_ATTRIBUTES + 4
+	j init
+	
+# switch level 8
+process_input_8:
+	# mark the GAME_STATUS
+	li $t0, 0
+	sw $t0, GAME_STATUS
+	jal reset_display
+	li $t0, 8
+	sw $t0, BRICK_ATTRIBUTES + 4
+	j init
+	
+# switch level 9
+process_input_9:
+	# mark the GAME_STATUS
+	li $t0, 0
+	sw $t0, GAME_STATUS
+	jal reset_display
+	li $t0, 9
+	sw $t0, BRICK_ATTRIBUTES + 4
+	j init
 
 # move the paddle
 process_input_a:
@@ -1053,9 +1218,11 @@ clear_bricks_inner_loop:
 	li $t9, 0x000000			# $t9 = color black
 	j clear_bricks_draw_brick
 clear_bricks_health_normal:
-	# if health is not 0, set color to the normal color
+	# if health is not 0, set color to the normal color (corresponding to the health )
 	la $t9, BRICK_ATTRIBUTES + 16	# $t9 = starting color addr
-	mul $t8, $t0, 4
+	li $t8, 7
+	sub $t8, $t8, $t5		# $t8 = 7 - health
+	mul $t8, $t8, 4
 	add $t9, $t9, $t8		# $t9 = current color addr
 	lw $t9, 0($t9)			# $t9 = current color
 	j clear_bricks_draw_brick
@@ -1117,5 +1284,69 @@ clear_bricks_end:
 	lw $ra, 0($sp)
 	addi $sp, $sp, 4
 	# return 
+	jr $ra
+	
+# registers: $t0 - $t5, $t8 - $t9
+reset_display:
+	add $sp, $sp, -4
+	sw $ra 0($sp)
+	addi $sp, $sp, -4		# start_x
+	sw $zero, 0($sp)
+	addi $sp, $sp, -4		# end_x
+	li $t0, MAX_X
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4		# y
+	sw $zero, 0($sp)
+	addi $sp, $sp, -4		# thickness
+	li $t0, MAX_Y
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4		# color		
+	sw $zero, 0($sp)
+	jal draw_block_unit
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+play_brick_sound:	
+	lw $t0, BRICK_SOUND_PITCH_OFFSET
+	addi $a0, $t0, 72		# pitch
+	li $a1, 600			# duration in miliseconds
+	li $a2, 0			# instrument
+	li $a3, 127			# volume
+	li $v0, 31
+	syscall
+	
+	addi $t0, $t0, 1
+	li $t1, 24
+	div $t0, $t1
+	mfhi $t0
+	sw $t0, BRICK_SOUND_PITCH_OFFSET
+	
+	jr $ra
+	
+play_paddle_sound:
+	# generate a random number from 0 to 12, result in $a0
+	li $a0, 1
+	li $a1, 12
+	li $v0, 42
+	syscall
+	
+	addi $a0, $a0, 36		# pitch
+	li $a1, 1000			# duration in miliseconds
+	li $a2, 38			# instrument
+	li $a3, 127			# volume
+	li $v0, 31
+	syscall
+	
+	jr $ra
+	
+play_wall_sound:
+	addi $a0, $a0, 60		# pitch
+	li $a1, 1000			# duration in miliseconds
+	li $a2, 117			# instrument
+	li $a3, 127			# volume
+	li $v0, 31
+	syscall
+	
 	jr $ra
 	
