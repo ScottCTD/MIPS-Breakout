@@ -16,6 +16,8 @@
 	.eqv DISPLAY_HEIGHT 256
 	.eqv MAX_X 128
 	.eqv MAX_Y 64
+	.eqv SLEEP 30
+	.eqv DEFAULT_HEARTS 3
 
 	.data
 ##############################################################################
@@ -41,6 +43,9 @@ PADDLE_ATTRIBUTES:
 BALL_ATTRIBUTES:
 	.word 0xFFFFFF	# ball color
 	.word 2		# ball radius
+	
+AUTO_MODE:
+	.word 0
 
 ##############################################################################
 # Mutable Data
@@ -63,7 +68,10 @@ BRICK_ATTRIBUTES:
 	.word 0x9400D3
 
 GAME_STATUS: 
-	.word 0		# 0 = stop, 1 = start
+	.word 0		# 0 = paused, 1 = start
+
+PLAYER_STATUS:
+	.word DEFAULT_HEARTS	# number of hearts
 
 # wall boundaries
 WALL_AABB:
@@ -502,24 +510,24 @@ update_locations:
 	jal move_ball
 	
 	# CHEAT: move the paddel accordingly
+	lw $t0, AUTO_MODE
+	bne $t0, 1, update_screen
 	li $a0, 0x000000
 	jal clear_paddle
 	lw $a0, BALL_DIRECTION
 	jal move_paddle
-	
+
+update_screen:
 	# 3. Draw the screen
 	jal draw_screen
-	
+
 	# 4. Sleep
 	li $v0, 32
-	li $a0, 0
+	li $a0, SLEEP
 	syscall 
 	
 	# 5. Go back to 1
 	j game_loop
-	
-	#li $v0, 10
-	#syscall
 	
 draw_screen:
 	# save the $ra
@@ -634,6 +642,9 @@ process_input_1:
 	jal reset_display
 	li $t0, 1
 	sw $t0, BRICK_ATTRIBUTES + 4
+	# reset player heart
+	li $t0, DEFAULT_HEARTS
+	sw $t0, PLAYER_STATUS
 	j init
 	
 # switch level 2
@@ -644,6 +655,9 @@ process_input_2:
 	jal reset_display
 	li $t0, 2
 	sw $t0, BRICK_ATTRIBUTES + 4
+	# reset player heart
+	li $t0, DEFAULT_HEARTS
+	sw $t0, PLAYER_STATUS
 	j init
 	
 # switch level 3
@@ -654,6 +668,9 @@ process_input_3:
 	jal reset_display
 	li $t0, 3
 	sw $t0, BRICK_ATTRIBUTES + 4
+	# reset player heart
+	li $t0, DEFAULT_HEARTS
+	sw $t0, PLAYER_STATUS
 	j init
 	
 # switch level 4
@@ -664,6 +681,9 @@ process_input_4:
 	jal reset_display
 	li $t0, 4
 	sw $t0, BRICK_ATTRIBUTES + 4
+	# reset player heart
+	li $t0, DEFAULT_HEARTS
+	sw $t0, PLAYER_STATUS
 	j init
 	
 # switch level 5
@@ -674,6 +694,9 @@ process_input_5:
 	jal reset_display
 	li $t0, 5
 	sw $t0, BRICK_ATTRIBUTES + 4
+	# reset player heart
+	li $t0, DEFAULT_HEARTS
+	sw $t0, PLAYER_STATUS
 	j init
 	
 # switch level 6
@@ -684,6 +707,9 @@ process_input_6:
 	jal reset_display
 	li $t0, 6
 	sw $t0, BRICK_ATTRIBUTES + 4
+	# reset player heart
+	li $t0, DEFAULT_HEARTS
+	sw $t0, PLAYER_STATUS
 	j init
 	
 # switch level 7
@@ -694,6 +720,9 @@ process_input_7:
 	jal reset_display
 	li $t0, 7
 	sw $t0, BRICK_ATTRIBUTES + 4
+	# reset player heart
+	li $t0, DEFAULT_HEARTS
+	sw $t0, PLAYER_STATUS
 	j init
 	
 # switch level 8
@@ -704,6 +733,9 @@ process_input_8:
 	jal reset_display
 	li $t0, 8
 	sw $t0, BRICK_ATTRIBUTES + 4
+	# reset player heart
+	li $t0, DEFAULT_HEARTS
+	sw $t0, PLAYER_STATUS
 	j init
 	
 # switch level 9
@@ -714,11 +746,15 @@ process_input_9:
 	jal reset_display
 	li $t0, 9
 	sw $t0, BRICK_ATTRIBUTES + 4
+	# reset player heart
+	li $t0, DEFAULT_HEARTS
+	sw $t0, PLAYER_STATUS
 	j init
 
 # move the paddle
 process_input_a:
-clear_screen_a:
+	lw $t0, GAME_STATUS
+	beq $t0, 0, after_process_input
 	# clear the paddle
 	li $a0, 0x000000
 	jal clear_paddle
@@ -730,7 +766,8 @@ clear_screen_a:
 	j after_process_input
 	
 process_input_d:
-clear_screen_d:
+	lw $t0, GAME_STATUS
+	beq $t0, 0, after_process_input
 	# clear the paddle
 	li $a0, 0x000000
 	jal clear_paddle
@@ -915,6 +952,9 @@ is_collide_end:
 # move the ball with x movement and y movement. +x = right, -x = left, +y = down, -y = up
 # registers: $t0 - $t3
 move_ball:
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+
 	lw $a0, BALL_DIRECTION
 	lw $a1, BALL_DIRECTION + 4
 
@@ -924,10 +964,40 @@ move_ball:
 	lw $t2, BALL_AABB + 8			# $t2 = right x
 	lw $t3, BALL_AABB + 12			# $t3 = lower y
 
+	# if the ball lower y hit the void, then decreases player heart, sleep, and reinit the paddle and ball
+	bne $t3, 64, move_ball_normal
+	lw $t0, PLAYER_STATUS
+	
+	# if no hearts any more, quit the game
+	beq $t0, 1, process_input_q
+	
+	addi $t0, $t0, -1
+	sw $t0, PLAYER_STATUS
+	
+	# sleep
+	li $v0, 32
+	li $a0, 2000
+	syscall
+
+	# pause
+	li $t0, 0
+	sw $t0, GAME_STATUS
+	
+	li $a0, 0x000000
+	jal clear_paddle
+	li $a0, 0x000000
+	jal clear_ball
+	
+	j init_paddle
+	
+	lw $ra, 0($sp)
+	addi $sp, $sp 4
+	jr $ra
+
+move_ball_normal:
 	# move the ball vertically
 	add $t1, $t1, $a1
 	add $t3, $t3, $a1
-	
 	# move the ball horizontally
 	add $t0, $t0, $a0
 	add $t2, $t2, $a0
@@ -938,6 +1008,8 @@ move_ball:
 	sw $t2, BALL_AABB + 8			# $t2 = right x
 	sw $t3, BALL_AABB + 12			# $t3 = lower y
 	
+	lw $ra, 0($sp)
+	addi $sp, $sp 4
 	jr $ra
 
 
