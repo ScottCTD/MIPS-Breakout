@@ -1,8 +1,7 @@
 ################ CSC258H1F Fall 2022 Assembly Final Project ##################
 # This file contains our implementation of Breakout.
 #
-# Student 1: Name, Student Number
-# Student 2: Name, Student Number
+# Student 1: Fuyang(Scott) Cui, 1007619935
 ######################## Bitmap Display Configuration ########################
 # - Unit width in pixels:       4
 # - Unit height in pixels:      4
@@ -16,8 +15,11 @@
 	.eqv DISPLAY_HEIGHT 256
 	.eqv MAX_X 128
 	.eqv MAX_Y 64
-	.eqv SLEEP 30
+	# settings
+	.eqv AUTO_MODE 0
+	.eqv SLEEP 32
 	.eqv DEFAULT_HEARTS 3
+	.eqv DEFAULT_MOVING_MODE 1
 
 	.data
 ##############################################################################
@@ -43,9 +45,6 @@ PADDLE_ATTRIBUTES:
 BALL_ATTRIBUTES:
 	.word 0xFFFFFF	# ball color
 	.word 2		# ball radius
-	
-AUTO_MODE:
-	.word 0
 
 ##############################################################################
 # Mutable Data
@@ -98,11 +97,15 @@ PADDLE_AABB:
 # the health (1 integer) and the AABB (4 integers)
 # so there are 63 * 5 = 315 integers
 # if the health is 0, then we don't display and collide the brick
+# the existence of level 0 raises this value to 
 BRICKS_DATA:
-	.word 0:315
+	.word 0:1750
 	
 BRICK_SOUND_PITCH_OFFSET:
 	.word 0
+	
+MOVING_MODE:
+	.word DEFAULT_MOVING_MODE	# 0 represent press 1 move 1
 
 ##############################################################################
 # Code
@@ -406,6 +409,7 @@ after_process_input:
 	beq $v1, 1, do_collision_1
 	beq $v1, 2, do_collision_2
 	beq $v1, 3, do_collision_3
+	beq $v1, 4, brick_collisions
 	
 brick_collisions:
 	# brick collisions
@@ -436,6 +440,7 @@ brick_collision_loop:
 	addi $sp, $sp, 4
 	# if no collisions 
 	beq $v0, 0, brick_collision_loop_unhealthy
+	# if collide
 	# save temps
 	addi $sp, $sp -4
 	sw $t0, 0($sp)
@@ -447,7 +452,6 @@ brick_collision_loop:
 	addi $sp, $sp, 4
 	lw $t0, 0($sp)
 	addi $sp, $sp, 4
-	# if collide
 	# health - 1
 	lw $t2, 0($t0)
 	addi $t2, $t2 -1
@@ -456,6 +460,7 @@ brick_collision_loop:
 	beq $v1, 1, do_collision_1
 	beq $v1, 2, do_collision_2
 	beq $v1, 3, do_collision_3
+	beq $v1, 4, update_locations
 brick_collision_loop_unhealthy:
 	# update the loop
 	add $t0, $t0, 20
@@ -497,7 +502,7 @@ do_collision_3:
 	mul $t1, $t0, 2
 	sub $t0, $t0, $t1
 	sw $t0, BALL_DIRECTION + 4
-	
+
 	j update_locations
 
 update_locations:
@@ -506,11 +511,19 @@ update_locations:
 	# clear the previous ball pos
 	li $a0, 0x000000
 	jal clear_ball
+	
 	# start moving the ball
 	jal move_ball
+
+	# if MOVING_MODE is 0, then we set direction to 0
+	lw $t0, MOVING_MODE
+	beq $t0, 1, moving_mode_1
+	sw $zero, BALL_DIRECTION
+	sw $zero, BALL_DIRECTION + 4
+moving_mode_1:
 	
 	# CHEAT: move the paddel accordingly
-	lw $t0, AUTO_MODE
+	li $t0, AUTO_MODE
 	bne $t0, 1, update_screen
 	li $a0, 0x000000
 	jal clear_paddle
@@ -578,6 +591,8 @@ process_input:
 	beq $t0, 0x38, process_input_8
 	# if key is "9"
 	beq $t0, 0x39, process_input_9
+	# if key is "0"
+	beq $t0, 0x30, process_input_0
 	
 	# paddle movement
 	# if key is "a"
@@ -600,8 +615,12 @@ process_input:
 	beq $t0, 0x6F, process_input_o
 	# if key is "m"
 	beq $t0, 0x6D, process_input_m
+	# if key is ","
+	beq $t0, 0x2C, process_input_comma
 	# if key is "."
 	beq $t0, 0x2E, process_input_dot
+	# if key is "n"
+	beq $t0, 0x6E, process_input_n
 	
 	j after_process_input
 
@@ -750,6 +769,19 @@ process_input_9:
 	li $t0, DEFAULT_HEARTS
 	sw $t0, PLAYER_STATUS
 	j init
+	
+# switch to level 0
+process_input_0:
+	# mark the GAME_STATUS
+	li $t0, 0
+	sw $t0, GAME_STATUS
+	jal reset_display
+	li $t0, 50
+	sw $t0, BRICK_ATTRIBUTES + 4
+	# reset player heart
+	li $t0, DEFAULT_HEARTS
+	sw $t0, PLAYER_STATUS
+	j init
 
 # move the paddle
 process_input_a:
@@ -848,6 +880,13 @@ process_input_m:
 	
 	j after_process_input
 
+# reset the direction
+process_input_comma:
+	sw $zero, BALL_DIRECTION
+	sw $zero, BALL_DIRECTION + 4
+	
+	j after_process_input
+
 # move the ball right down
 process_input_dot:
 	# move the ball rightward down
@@ -857,17 +896,28 @@ process_input_dot:
 	sw $t1, BALL_DIRECTION + 4
 	
 	j after_process_input
+	
+# flip the moving mode
+process_input_n:
+	lw $t0, MOVING_MODE
+	not $t0, $t0
+	and $t0, $t0, 1
+	sw $t0, MOVING_MODE
+	
+	j after_process_input
+	
 
 ##############################################################################
 # FUNCTIONS
 ##############################################################################
 	
 # decide if two AABBs collide
-# parameter: $a0 = the addr of AABB1, $a2 = the addr of AABB2
+# parameter: $a0 = the addr of AABB1 (should always be ball), $a2 = the addr of AABB2
 # returns: $v0 = if collided, $v1 = the colission type, -1 if not collide
 # collision type 1 = flip vertically
 # collision type 2 = flip horizontally
 # collision type 3 = flip both
+# collision type 4 = flop nothing
 # registers: $t0 - $t7
 is_collide:
 	# save variables
@@ -882,15 +932,15 @@ is_collide:
 	addi $sp, $sp, -4
 	sw $s4, 0($sp)
 	# get AABBs
-	lw $t0, 0($a0)				# $t0 = x0 of AABB1
-	lw $t1, 4($a0)				# $t1 = y0 of AABB1
-	lw $t2, 8($a0)				# $t2 = right x of AABB1
-	lw $t3, 12($a0)				# $t3 = lower y of AABB1
+	lw $t0, 0($a0)				# $t0 = x01
+	lw $t1, 4($a0)				# $t1 = y01
+	lw $t2, 8($a0)				# $t2 = x11
+	lw $t3, 12($a0)				# $t3 = y11
 	
-	lw $t4, 0($a1)				# $t4 = x0 of AABB2
-	lw $t5, 4($a1)				# $t5 = y0 of AABB2
-	lw $t6, 8($a1)				# $t6 = right x of AABB2
-	lw $t7, 12($a1)				# $t7 = lower y of AABB2
+	lw $t4, 0($a1)				# $t4 = x02
+	lw $t5, 4($a1)				# $t5 = y02
+	lw $t6, 8($a1)				# $t6 = x12
+	lw $t7, 12($a1)				# $t7 = y12
 	
 	# collision on x?
 	sgeu $s0, $t2, $t4
@@ -910,22 +960,99 @@ is_collide:
 	j is_collide_end
 is_collide_true:
 	# decide which type
-	# if the at least one distance between lower y1 and y02, or between y01 and lower y2 is 0, then it is a type 1
-	sub $s0, $t1, $t7			# $s0 = y01 - lower y2
-	sub $s1, $t3, $t5			# $s1 = lower y1 - y02
-	and $s2, $s0, $s1			# $s2 = 0 iff at least one of them is zero
-	# at least one 0, go type 1
-	beq $s2, 0, is_collide_type1
-	# if the at least one distance between right x1 and x02, or between x01 and right x2 is 0, then it is a type 2
-	sub $s0, $t0, $t6			# $s0 = x01 - right x2
-	sub $s1, $t2, $t4			# $s1 = right x1 - x02
-	and $s2, $s0, $s1			# $s2 = 0 iff at least one of them is zero
-	# at least one 0, go type 2
-	beq $s2, 0, is_collide_type2
-	# otherwise, type 3
-	li $v0, 1
-	li $v1, 3
-	j is_collide_end
+
+	# $s0 = 1 if there is at least 1 zero distance between ys
+	# $s0 = 0 if there is not a zero distance between ys
+	sub $s0, $t3, $t5			# $s0 = y11 - y02
+	sub $s1, $t7, $t1			# $s1 = y12 - y01
+	seq $s0, $s0, 0				# $s0 = 1 if y11 - y02 = 0
+	seq $s1, $s1, 0				# $s1 = 1 if y12 - y01 = 0
+	or $s0, $s0, $s1				# $s0 = 1 if there is a 0
+	# $s1 = 1 if there is at least 1 zero distance between xs
+	# $s1 = 0 if there is not a zero distance between xs
+	sub $s1, $t4, $t2			# $s1 = x02 - x11
+	sub $s2, $t6, $t0			# $s2 = x12 - x01
+	seq $s1, $s1, 0				# $s1 = 1 if x02 - x11 = 0
+	seq $s2, $s2, 0				# $s2 = 1 if x12 - x01 = 0
+	or $s1, $s1, $s2				# $s1 = 1 if there is a 0
+	
+	# type 1 checks 
+	# if there exist a zero distance between ys $s0 = 1
+	# and there does not exist a zero distance between xs $s1 = 0, except x01 == x02 or x11 == x12
+	# then it is a type 1 collision
+	seq $s2, $s0, 1				# $s0 == 1?
+	seq $s3, $s1, 0				# $s1 == 0?
+	seq $s4, $t0, $t4			# x01 == x02?
+	seq $s5, $t2, $t6			# x11 == x12?
+	or $s3, $s3, $s4				# $s3 = $s1 == 0 or x01 == x02  
+	or $s3, $s3, $s5				# $s3 = $s1 == 0 or x01 == x02 or x11 == x12
+	and $s2, $s2, $s3
+	beq $s2, 1, is_collide_type1
+	
+
+	# type 2 checks 
+	# if there exist a zero distance between xs $s1 = 1
+	# and there does not exist a zero distance between xs $s0 = 0, except y01 == y02 or y11 == y12
+	# then it is a type 2 collision
+	seq $s2, $s0, 0				# $s0 == 0?
+	seq $s3, $s1, 1				# $s1 == 1?
+	seq $s4, $t1, $t5			# y01 == y02?
+	seq $s5, $t3, $t7			# y11 == y12?
+	or $s2, $s2, $s4				# $s2 = $s0 == 0 or y01 == y02  
+	or $s2, $s2, $s5				# $s2 = $s0 == 0 or y01 == y02 or y11 == y12
+	and $s2, $s2, $s3
+	beq $s2, 1, is_collide_type2
+	
+	# type 3 and type 4
+	lw $s0, BALL_DIRECTION			# $s0 = ball x direction
+	lw $s1, BALL_DIRECTION + 4		# $s1 = ball y direction
+	# case 1: ball direction = (1, 1) and collide on upper left point: x11 == x02 and y11 == y02
+	seq $s2, $t2, $t4			# $s2 = x11 == x02
+	seq $s3, $t3, $t5			# $s3 = y11 == y02
+	and $s2, $s2, $s3			# $s2 = x11 == x02 and y11 == y02
+	seq $s3, $s0, 1				# $s3 = ball_x == 1
+	seq $s4, $s1, 1				# $s4 = ball_y == 1
+	and $s3, $s3, $s4			# $s3 = ball_x == 1 and ball_y == 1
+	and $s4, $s2, $s3			# $s4 = x11 == x02 and y11 == y02 and ball_x == 1 and ball_y == 1
+	beq $s4, 1, is_collide_type3		# if x11 == x02 and y11 == y02 and ball_x == 1 and ball_y == 1, go type 3
+	beq $s3, 1, is_collide_type4		# if incorrect position but correct direction, then type 4
+	
+	# case 2: ball direction = (-1, 1) and collide on upper right point: x01 == x12 and y11 == y02
+	seq $s2, $t0, $t6			# $s2 = x01 == x12
+	seq $s3, $t3, $t5			# $s3 = y11 == y02
+	and $s2, $s2, $s3			# $s2 = x01 == x12 and y11 == y02
+	seq $s3, $s0, -1				# $s3 = ball_x == -1
+	seq $s4, $s1, 1				# $s4 = ball_y == 1
+	and $s3, $s3, $s4			# $s3 = ball_x == -1 and ball_y == 1
+	and $s4, $s2, $s3			# $s4 = x01 == x12 and y11 == y02 and ball_x == -1 and ball_y == 1
+	beq $s4, 1, is_collide_type3		# if x01 == x12 and y11 == y02 and ball_x == -1 and ball_y == 1, go type 3
+	beq $s3, 1, is_collide_type4		# if incorrect position but correct direction, then type 4
+	
+	# case 3: ball direction = (1, -1) and collide on lower left corner: x11 == x02 and y01 == y12
+	seq $s2, $t2, $t4			# $s2 = x11 == x02
+	seq $s3, $t1, $t7			# $s3 = y01 == y12
+	and $s2, $s2, $s3			# $s2 = x11 == x02 and y01 == y12
+	seq $s3, $s0, 1				# $s3 = ball_x == 1
+	seq $s4, $s1, -1				# $s4 = ball_y == -1
+	and $s3, $s3, $s4			# $s3 = ball_x == 1 and ball_y == -1
+	and $s4, $s2, $s3			# $s4 = x11 == x02 and y01 == y12 and ball_x == 1 and ball_y == -1
+	beq $s4, 1, is_collide_type3		# if x11 == x02 and y01 == y12 and ball_x == 1 and ball_y == -1, go type 3
+	beq $s3, 1, is_collide_type4		# if incorrect position but correct direction, then type 4
+	
+	# case 4: ball direction = (-1, -1) and collide on lower right corner: x01 == x12 and y01 == y12
+	seq $s2, $t0, $t6			# $s2 = x01 == x12
+	seq $s3, $t1, $t7			# $s3 = y01 == y12
+	and $s2, $s2, $s3			# $s2 = x01 == x12 and y01 == y12
+	seq $s3, $s0, -1				# $s3 = ball_x == -1
+	seq $s4, $s1, -1				# $s4 = ball_y == -1
+	and $s3, $s3, $s4			# $s3 = ball_x == -1 and ball_y == -1
+	and $s4, $s2, $s3			# $s4 = x01 == x12 and y01 == y12 and ball_x == -1 and ball_y == -1
+	beq $s4, 1, is_collide_type3		# if x01 == x12 and y01 == y12 and ball_x == -1 and ball_y == -1, go type 3
+	beq $s3, 1, is_collide_type4		# if incorrect position but correct direction, then type 4
+	
+	# otherwise, there should be no situations, so we do type 3
+	b is_collide_type3
+
 is_collide_type1:
 	li $v0, 1
 	li $v1, 1
@@ -933,6 +1060,14 @@ is_collide_type1:
 is_collide_type2:
 	li $v0, 1
 	li $v1, 2
+	j is_collide_end
+is_collide_type3:
+	li $v0, 1
+	li $v1, 3
+	j is_collide_end
+is_collide_type4:
+	li $v0, 1
+	li $v1, 4
 	j is_collide_end
 is_collide_end:
 	# restore variables
