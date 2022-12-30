@@ -1,7 +1,6 @@
-################ CSC258H1F Fall 2022 Assembly Final Project ##################
+################ MIPS Assembly Project ##################
 # This file contains our implementation of Breakout.
 #
-# Student 1: Fuyang(Scott) Cui, 1007619935
 ######################## Bitmap Display Configuration ########################
 # - Unit width in pixels:       4
 # - Unit height in pixels:      4
